@@ -67,6 +67,7 @@ export interface SlideVisualCandidateMeta {
   id: string;
   source: "crop" | "viewport" | "page_asset";
   image: ScrapedImage;
+  crop?: ScreenshotCrop;
 }
 
 interface SlideVisualCandidate extends SlideVisualCandidateMeta {
@@ -326,6 +327,9 @@ export async function runAutoPipeline(opts: {
       new Set(
         [
           preferredCandidate?.id,
+          visualCandidates.find(candidate => candidate.source === "crop")?.id,
+          visualCandidates.find(candidate => candidate.source === "viewport")
+            ?.id,
           ...rankedCandidates.slice(0, 3).map(candidate => candidate.id),
         ].filter(Boolean)
       )
@@ -353,6 +357,15 @@ export async function runAutoPipeline(opts: {
           verification: VerificationResult;
         }
       | undefined;
+    let firstAttempt:
+      | {
+          candidate: SlideVisualCandidate;
+          processed: Buffer;
+          slide: SlideSpec;
+          composited: Buffer;
+          verification: VerificationResult;
+        }
+      | undefined;
 
     for (const candidate of candidateQueue) {
       console.log(
@@ -369,7 +382,13 @@ export async function runAutoPipeline(opts: {
           brand,
         });
 
-        if (!fallbackAttempt) fallbackAttempt = attempt;
+        if (!firstAttempt) firstAttempt = attempt;
+        if (
+          !fallbackAttempt &&
+          attempt.verification.status !== "missing_target"
+        ) {
+          fallbackAttempt = attempt;
+        }
 
         if (attempt.verification.status === "missing_target") {
           console.warn(
@@ -388,7 +407,7 @@ export async function runAutoPipeline(opts: {
       }
     }
 
-    const chosenAttempt = finalizedAttempt || fallbackAttempt;
+    const chosenAttempt = finalizedAttempt || fallbackAttempt || firstAttempt;
     if (!chosenAttempt) {
       throw new Error(`No viable visual candidate found for slide ${i + 1}`);
     }
@@ -660,6 +679,7 @@ async function buildSlideVisualCandidates(opts: {
     candidates.unshift({
       id: `crop-${slideIndex}`,
       source: "crop",
+      crop: selectedCrop,
       buffer: croppedBuffer,
       image: {
         url: `${sourceUrl}#crop-${slideIndex}`,
@@ -711,9 +731,10 @@ async function analyzeCandidateVisual(opts: {
       slide.title = plannedTitle;
     }
 
-    if (!slide.instructions || slide.instructions.length === 0) {
-      slide.instructions = [slideGoal];
-    }
+    slide.instructions = normalizeInstructionList(
+      slide.instructions,
+      slideGoal
+    );
   } catch (err) {
     console.error(`[pipeline] Analysis ${stepNumber} failed:`, err);
     slide = {
@@ -853,13 +874,16 @@ function getIntentAdjustment(
   const isScreenshot =
     candidate.source === "crop" || candidate.source === "viewport";
   const imageType = candidate.image.type;
+  const cropPenalty =
+    candidate.source === "crop" ? getCropPenalty(candidate.crop) : 0;
 
   if (intent === "ui_step") {
     return (
       (candidate.source === "crop" ? 0.18 : 0) +
       (candidate.source === "viewport" ? 0.1 : 0) +
       (!isScreenshot ? -0.14 : 0) +
-      (imageType === "video_thumbnail" ? -0.18 : 0)
+      (imageType === "video_thumbnail" ? -0.18 : 0) +
+      cropPenalty
     );
   }
 
@@ -867,7 +891,8 @@ function getIntentAdjustment(
     return (
       (candidate.source === "page_asset" ? 0.12 : 0) +
       (imageType === "og_image" ? 0.08 : 0) +
-      (candidate.source === "crop" ? -0.03 : 0)
+      (candidate.source === "crop" ? -0.03 : 0) +
+      cropPenalty
     );
   }
 
@@ -881,8 +906,28 @@ function getIntentAdjustment(
 
   return (
     (imageType === "video_thumbnail" ? 0.24 : 0) +
-    (candidate.source === "page_asset" ? 0.08 : -0.04)
+    (candidate.source === "page_asset" ? 0.08 : -0.04) +
+    cropPenalty
   );
+}
+
+export function normalizeInstructionList(
+  instructions: unknown,
+  fallback: string
+): string[] {
+  const normalized = Array.isArray(instructions)
+    ? instructions
+        .filter((item): item is string => typeof item === "string")
+        .map(item => item.trim())
+        .filter(Boolean)
+    : typeof instructions === "string"
+      ? instructions
+          .split(/\r?\n/)
+          .map(item => item.trim())
+          .filter(Boolean)
+      : [];
+
+  return normalized.length > 0 ? normalized : [fallback];
 }
 
 function normalizeSlideAnnotations(slide: SlideSpec) {
@@ -947,4 +992,18 @@ function annotationsAreValid(annotations: SlideSpec["annotations"]) {
       (!a.w || (a.w > 0 && a.w <= 1)) &&
       (!a.h || (a.h > 0 && a.h <= 1))
   );
+}
+
+function getCropPenalty(crop?: ScreenshotCrop) {
+  if (!crop) return 0;
+
+  const area = crop.width * crop.height;
+  let penalty = 0;
+
+  if (crop.width < 0.42) penalty -= 0.08;
+  if (crop.width < 0.36) penalty -= 0.08;
+  if (area < 0.14) penalty -= 0.08;
+  if (crop.top < 0.12 && crop.height < 0.3) penalty -= 0.08;
+
+  return penalty;
 }

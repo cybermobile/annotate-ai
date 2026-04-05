@@ -557,6 +557,69 @@ describe("slide visual candidate ranking", () => {
     expect(ranked[0].source).toBe("page_asset");
     expect(ranked[0].image.type).toBe("logo");
   });
+
+  it("demotes over-tight top navigation crops for UI slides", async () => {
+    const { rankSlideVisualCandidates } = await import("./pipeline");
+
+    const ranked = rankSlideVisualCandidates(
+      [
+        {
+          id: "crop-tight",
+          source: "crop",
+          crop: { left: 0.72, top: 0.02, width: 0.34, height: 0.24 },
+          image: {
+            url: "https://example.com#crop-tight",
+            alt: "Tight crop of a top nav button",
+            width: 480,
+            height: 320,
+            type: "screenshot",
+            publishedAt: new Date().toISOString(),
+          },
+        },
+        {
+          id: "viewport-0",
+          source: "viewport",
+          image: {
+            url: "https://example.com#viewport-0",
+            alt: "Viewport screenshot",
+            width: 1440,
+            height: 900,
+            type: "screenshot",
+            publishedAt: new Date().toISOString(),
+          },
+        },
+      ],
+      {
+        sourceUrl: "https://example.com",
+        title: "Open profile",
+        description: "Click the profile button in the top navigation",
+        targetRatio: "4:5",
+      }
+    );
+
+    expect(ranked[0].source).toBe("viewport");
+  });
+});
+
+describe("instruction normalization", () => {
+  it("converts single-string instructions into a single list item", async () => {
+    const { normalizeInstructionList } = await import("./pipeline");
+
+    expect(
+      normalizeInstructionList("Click the Comfy Cloud button", "fallback")
+    ).toEqual(["Click the Comfy Cloud button"]);
+  });
+
+  it("falls back when instructions are empty or malformed", async () => {
+    const { normalizeInstructionList } = await import("./pipeline");
+
+    expect(normalizeInstructionList(undefined, "fallback")).toEqual([
+      "fallback",
+    ]);
+    expect(normalizeInstructionList(["", "  "], "fallback")).toEqual([
+      "fallback",
+    ]);
+  });
 });
 
 // ── Brand Overrides Tests ───────────────────────────────────────
