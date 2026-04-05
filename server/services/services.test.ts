@@ -474,6 +474,91 @@ describe("pipeline types", () => {
   });
 });
 
+describe("slide visual candidate ranking", () => {
+  it("prefers screenshot candidates for interaction-heavy slides", async () => {
+    const { rankSlideVisualCandidates } = await import("./pipeline");
+
+    const ranked = rankSlideVisualCandidates(
+      [
+        {
+          id: "crop-0",
+          source: "crop",
+          image: {
+            url: "https://example.com#crop-0",
+            alt: "Focused screenshot of the settings button",
+            width: 960,
+            height: 540,
+            type: "screenshot",
+            publishedAt: new Date().toISOString(),
+          },
+        },
+        {
+          id: "asset-0",
+          source: "page_asset",
+          image: {
+            url: "https://example.com/hero.png#asset-0",
+            alt: "Product hero illustration",
+            width: 1600,
+            height: 900,
+            type: "og_image",
+            publishedAt: new Date().toISOString(),
+          },
+        },
+      ],
+      {
+        sourceUrl: "https://example.com",
+        title: "Open settings",
+        description: "Click the settings button in the top navigation",
+        targetRatio: "4:5",
+      }
+    );
+
+    expect(ranked[0].intent).toBe("ui_step");
+    expect(ranked[0].source).toBe("crop");
+  });
+
+  it("prefers brand assets for brand-focused slides", async () => {
+    const { rankSlideVisualCandidates } = await import("./pipeline");
+
+    const ranked = rankSlideVisualCandidates(
+      [
+        {
+          id: "viewport-0",
+          source: "viewport",
+          image: {
+            url: "https://example.com#viewport-0",
+            alt: "Viewport screenshot",
+            width: 1440,
+            height: 900,
+            type: "screenshot",
+          },
+        },
+        {
+          id: "asset-logo",
+          source: "page_asset",
+          image: {
+            url: "https://cdn.example.com/logo.png#asset-logo",
+            alt: "Example logo",
+            width: 512,
+            height: 512,
+            type: "logo",
+          },
+        },
+      ],
+      {
+        sourceUrl: "https://example.com",
+        title: "Brand recognition",
+        description: "Highlight the company logo and brand identity",
+        targetRatio: "4:5",
+      }
+    );
+
+    expect(ranked[0].intent).toBe("brand_asset");
+    expect(ranked[0].source).toBe("page_asset");
+    expect(ranked[0].image.type).toBe("logo");
+  });
+});
+
 // ── Brand Overrides Tests ───────────────────────────────────────
 
 describe("compositor with brand overrides", () => {

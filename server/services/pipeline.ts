@@ -1,4 +1,4 @@
-import { scrapeUrl, type ScrapedData } from "./scraper";
+import { scrapeUrl, type ScrapedData, type ScrapedImage } from "./scraper";
 import {
   captureScreenshot,
   fetchImageBuffer,
@@ -12,6 +12,7 @@ import {
   type SlideSpec,
   type CarouselPlan,
   type ScreenshotCrop,
+  type VerificationResult,
 } from "./analyzer";
 import {
   compositeSlide,
@@ -54,6 +55,22 @@ export interface PipelineResult {
   scrapedData: ScrapedData;
   plan: CarouselPlan;
   tutorialSteps: SlideSpec[];
+}
+
+export type SlideVisualIntent =
+  | "ui_step"
+  | "supporting_visual"
+  | "brand_asset"
+  | "video_reference";
+
+export interface SlideVisualCandidateMeta {
+  id: string;
+  source: "crop" | "viewport" | "page_asset";
+  image: ScrapedImage;
+}
+
+interface SlideVisualCandidate extends SlideVisualCandidateMeta {
+  buffer: Buffer;
 }
 
 /**
@@ -126,13 +143,11 @@ export async function runAutoPipeline(opts: {
 
   console.log(
     `[pipeline] Scored ${scoredImages.length} images. Top 3:`,
-    scoredImages
-      .slice(0, 3)
-      .map(i => ({
-        url: i.url.slice(0, 60),
-        score: i.score.toFixed(2),
-        type: i.type,
-      }))
+    scoredImages.slice(0, 3).map(i => ({
+      url: i.url.slice(0, 60),
+      score: i.score.toFixed(2),
+      type: i.type,
+    }))
   );
 
   // ── Step 3: Plan the carousel ────────────────────────────────
@@ -233,6 +248,11 @@ export async function runAutoPipeline(opts: {
     scoredImages.length > 0
       ? await fetchImageBufferSafe(scoredImages[0].url)
       : null;
+  const reusableAssetCandidates = await buildReusableAssetCandidates({
+    scoredImages,
+    sourceUrl: url,
+    limit: 5,
+  });
 
   const hookBuffer = await compositeHookSlide({
     backgroundImage: hookBgImage || viewportScreenshot || mainScreenshot,
@@ -276,93 +296,107 @@ export async function runAutoPipeline(opts: {
       ratio,
     }).catch(() => undefined);
 
-    const slideScreenshot = selectedCrop
-      ? await cropScreenshotBuffer(screenshotToUse, selectedCrop)
-      : viewportScreenshot || mainScreenshot;
-
-    const processed = await preprocessScreenshot(slideScreenshot, {
-      roundCorners: true,
-      cornerRadius: 12,
+    const visualCandidates = await buildSlideVisualCandidates({
+      sourceUrl: url,
+      slideIndex: i,
+      slideGoal,
+      ratio,
+      mainScreenshot,
+      viewportScreenshot: viewportScreenshot || mainScreenshot,
+      selectedCrop,
+      reusableAssetCandidates,
+      pagePublishedAt: scrapedData.pagePublishedAt,
+      pageUpdatedAt: scrapedData.pageUpdatedAt,
     });
 
-    // Ask LLM to analyze the screenshot with this slide's specific description
-    let slide: SlideSpec;
-    try {
-      const analysis = await analyzeScreenshot({
-        screenshot: processed,
+    const rankedCandidates = rankSlideVisualCandidates(
+      visualCandidates.map(({ buffer: _buffer, ...candidate }) => candidate),
+      {
+        sourceUrl: url,
+        title: contentSlides[i]?.title,
         description: slideGoal,
-        totalSlides: 1,
-      });
-      slide = analysis.slides[0];
-      slide.stepNumber = i + 1;
-
-      // Use planned title if analysis title is too short
-      if (contentSlides[i]?.title && (slide.title || "").length < 5) {
-        slide.title = contentSlides[i].title;
+        targetRatio: ratio,
+        pagePublishedAt: scrapedData.pagePublishedAt,
+        pageUpdatedAt: scrapedData.pageUpdatedAt,
       }
+    );
 
-      // Merge instructions from the plan if the analysis didn't produce good ones
-      if (!slide.instructions || slide.instructions.length === 0) {
-        slide.instructions = [slideGoal];
-      }
+    const preferredCandidate = choosePreferredSlideVisual(rankedCandidates);
+    const candidateQueue = Array.from(
+      new Set(
+        [
+          preferredCandidate?.id,
+          ...rankedCandidates.slice(0, 3).map(candidate => candidate.id),
+        ].filter(Boolean)
+      )
+    )
+      .map(id => visualCandidates.find(candidate => candidate.id === id))
+      .filter((candidate): candidate is SlideVisualCandidate =>
+        Boolean(candidate)
+      );
 
-      // Normalize coordinates — if LLM returned pixel values instead of 0-1 relative
-      if (slide.annotations) {
-        const needsNormalize = slide.annotations.some(
-          a => a.x > 1 || a.y > 1 || (a.w && a.w > 1) || (a.h && a.h > 1)
-        );
-        if (needsNormalize) {
-          console.log(
-            `[pipeline] Slide ${i + 1}: normalizing pixel coordinates to relative`
-          );
-          // Assume viewport is ~1440x900 based on screenshot config
-          const vw = 1440,
-            vh = 900;
-          for (const ann of slide.annotations) {
-            if (ann.x > 1) ann.x = Math.min(ann.x / vw, 0.95);
-            if (ann.y > 1) ann.y = Math.min(ann.y / vh, 0.95);
-            if (ann.w && ann.w > 1) ann.w = Math.min(ann.w / vw, 0.9);
-            if (ann.h && ann.h > 1) ann.h = Math.min(ann.h / vh, 0.9);
-            if (ann.toX && ann.toX > 1) ann.toX = Math.min(ann.toX / vw, 0.95);
-            if (ann.toY && ann.toY > 1) ann.toY = Math.min(ann.toY / vh, 0.95);
-          }
+    let finalizedAttempt:
+      | {
+          candidate: SlideVisualCandidate;
+          processed: Buffer;
+          slide: SlideSpec;
+          composited: Buffer;
+          verification: VerificationResult;
         }
-
-        // Clamp all coordinates to valid range
-        for (const ann of slide.annotations) {
-          ann.x = Math.max(0.02, Math.min(ann.x, 0.98));
-          ann.y = Math.max(0.02, Math.min(ann.y, 0.98));
-          if (ann.w) ann.w = Math.max(0.05, Math.min(ann.w, 0.95));
-          if (ann.h) ann.h = Math.max(0.05, Math.min(ann.h, 0.95));
+      | undefined;
+    let fallbackAttempt:
+      | {
+          candidate: SlideVisualCandidate;
+          processed: Buffer;
+          slide: SlideSpec;
+          composited: Buffer;
+          verification: VerificationResult;
         }
-      }
+      | undefined;
 
-      // Ensure every slide has at least a badge + highlight
-      if (!slide.annotations || slide.annotations.length === 0) {
-        slide.annotations = [
-          { type: "highlight", x: 0.1, y: 0.3, w: 0.8, h: 0.4 },
-          { type: "badge", number: 1, x: 0.1, y: 0.3 },
-        ];
-      } else if (!slide.annotations.some(a => a.type === "highlight")) {
-        slide.annotations.push({
-          type: "highlight",
-          x: 0.1,
-          y: 0.3,
-          w: 0.8,
-          h: 0.4,
+    for (const candidate of candidateQueue) {
+      console.log(
+        `[pipeline] Slide ${i + 1}: trying visual source ${candidate.source}`
+      );
+
+      try {
+        const attempt = await analyzeCandidateVisual({
+          candidate,
+          slideGoal,
+          plannedTitle: contentSlides[i]?.title,
+          stepNumber: i + 1,
+          ratio,
+          brand,
         });
-      } else if (!slide.annotations.some(a => a.type === "badge")) {
-        slide.annotations.unshift({ type: "badge", number: 1, x: 0.5, y: 0.5 });
+
+        if (!fallbackAttempt) fallbackAttempt = attempt;
+
+        if (attempt.verification.status === "missing_target") {
+          console.warn(
+            `[pipeline] Slide ${i + 1}: target missing from ${candidate.source}, trying next candidate`
+          );
+          continue;
+        }
+
+        finalizedAttempt = attempt;
+        break;
+      } catch (err) {
+        console.warn(
+          `[pipeline] Slide ${i + 1}: candidate ${candidate.source} failed:`,
+          err instanceof Error ? err.message : err
+        );
       }
-    } catch (err) {
-      console.error(`[pipeline] Analysis ${i + 1} failed:`, err);
-      slide = {
-        stepNumber: i + 1,
-        title: contentSlides[i]?.title || `Step ${i + 1}`,
-        instructions: [slideGoal],
-        annotations: [{ type: "badge", number: 1, x: 0.5, y: 0.5 }],
-      };
     }
+
+    const chosenAttempt = finalizedAttempt || fallbackAttempt;
+    if (!chosenAttempt) {
+      throw new Error(`No viable visual candidate found for slide ${i + 1}`);
+    }
+
+    let { slide, composited } = chosenAttempt;
+    console.log(
+      `[pipeline] Slide ${i + 1}: selected visual source ${chosenAttempt.candidate.source}`
+    );
 
     // Renumber badges sequentially across all slides
     let badgeCount = 0;
@@ -381,74 +415,12 @@ export async function runAutoPipeline(opts: {
       JSON.stringify(slide.annotations)
     );
     tutorialSteps.push(slide);
-
-    let composited = await compositeSlide({
-      screenshot: processed,
+    composited = await compositeSlide({
+      screenshot: chosenAttempt.processed,
       slide,
       ratio,
       brand,
     });
-
-    try {
-      const corrected = await verifyAnnotations({
-        compositedImage: composited,
-        originalScreenshot: processed,
-        slide,
-        description: slideGoal,
-      });
-
-      if (corrected && corrected.length > 0) {
-        // Validate corrected coordinates are within bounds (0-1)
-        const valid = corrected.every(
-          a =>
-            a.x >= 0 &&
-            a.x <= 1 &&
-            a.y >= 0 &&
-            a.y <= 1 &&
-            (!a.w || (a.w > 0 && a.w <= 1)) &&
-            (!a.h || (a.h > 0 && a.h <= 1))
-        );
-
-        if (valid) {
-          console.log(
-            `[pipeline] Slide ${i + 1}: re-compositing with ${corrected.length} corrected annotations`
-          );
-          slide.annotations = corrected;
-          if (!slide.annotations.some(a => a.type === "highlight")) {
-            slide.annotations.push({
-              type: "highlight",
-              x: 0.1,
-              y: 0.3,
-              w: 0.8,
-              h: 0.4,
-            });
-          }
-          if (!slide.annotations.some(a => a.type === "badge")) {
-            slide.annotations.unshift({
-              type: "badge",
-              number: 1,
-              x: 0.5,
-              y: 0.5,
-            });
-          }
-          composited = await compositeSlide({
-            screenshot: processed,
-            slide,
-            ratio,
-            brand,
-          });
-        } else {
-          console.warn(
-            `[pipeline] Slide ${i + 1}: corrected annotations out of bounds, keeping original`
-          );
-        }
-      }
-    } catch (err) {
-      console.warn(
-        `[pipeline] Verification failed for slide ${i + 1}, keeping original:`,
-        err instanceof Error ? err.message : err
-      );
-    }
 
     const fileKey = `annotated/${nanoid()}-slide-${i + 1}.png`;
     const { url: imageUrl, key } = await storagePut(
@@ -598,4 +570,381 @@ async function cropScreenshotBuffer(
     })
     .png()
     .toBuffer();
+}
+
+async function buildReusableAssetCandidates(opts: {
+  scoredImages: ScoredImage[];
+  sourceUrl: string;
+  limit: number;
+}): Promise<SlideVisualCandidate[]> {
+  const { scoredImages, sourceUrl, limit } = opts;
+  const candidates: SlideVisualCandidate[] = [];
+
+  for (const img of scoredImages) {
+    if (candidates.length >= limit) break;
+
+    const buffer = await fetchImageBufferSafe(img.url);
+    if (!buffer) continue;
+
+    const normalized = await sharp(buffer).png().toBuffer();
+    const meta = await sharp(normalized).metadata();
+    const width = meta.width || img.width || 0;
+    const height = meta.height || img.height || 0;
+
+    if (img.type !== "logo" && (width < 200 || height < 120)) continue;
+
+    candidates.push({
+      id: `asset-${candidates.length}`,
+      source: "page_asset",
+      buffer: normalized,
+      image: {
+        ...img,
+        width: img.width ?? (width || undefined),
+        height: img.height ?? (height || undefined),
+        url: `${img.url}#asset-${candidates.length}`,
+      },
+    });
+  }
+
+  return candidates;
+}
+
+async function buildSlideVisualCandidates(opts: {
+  sourceUrl: string;
+  slideIndex: number;
+  slideGoal: string;
+  ratio: string;
+  mainScreenshot: Buffer;
+  viewportScreenshot: Buffer;
+  selectedCrop?: ScreenshotCrop;
+  reusableAssetCandidates: SlideVisualCandidate[];
+  pagePublishedAt?: string;
+  pageUpdatedAt?: string;
+}): Promise<SlideVisualCandidate[]> {
+  const {
+    sourceUrl,
+    slideIndex,
+    slideGoal,
+    mainScreenshot,
+    viewportScreenshot,
+    selectedCrop,
+    reusableAssetCandidates,
+    pagePublishedAt,
+    pageUpdatedAt,
+  } = opts;
+
+  const candidates: SlideVisualCandidate[] = [];
+  const viewportMeta = await sharp(viewportScreenshot).metadata();
+  candidates.push({
+    id: `viewport-${slideIndex}`,
+    source: "viewport",
+    buffer: viewportScreenshot,
+    image: {
+      url: `${sourceUrl}#viewport-${slideIndex}`,
+      alt: `Viewport screenshot for ${slideGoal}`,
+      width: viewportMeta.width || undefined,
+      height: viewportMeta.height || undefined,
+      type: "screenshot",
+      sourceContext: "page_image",
+      publishedAt: pagePublishedAt,
+      updatedAt: pageUpdatedAt,
+    },
+  });
+
+  if (selectedCrop) {
+    const croppedBuffer = await cropScreenshotBuffer(
+      mainScreenshot,
+      selectedCrop
+    );
+    const cropMeta = await sharp(croppedBuffer).metadata();
+    candidates.unshift({
+      id: `crop-${slideIndex}`,
+      source: "crop",
+      buffer: croppedBuffer,
+      image: {
+        url: `${sourceUrl}#crop-${slideIndex}`,
+        alt: `Focused screenshot for ${slideGoal}`,
+        width: cropMeta.width || undefined,
+        height: cropMeta.height || undefined,
+        type: "screenshot",
+        sourceContext: "page_image",
+        publishedAt: pagePublishedAt,
+        updatedAt: pageUpdatedAt,
+      },
+    });
+  }
+
+  return [...candidates, ...reusableAssetCandidates];
+}
+
+async function analyzeCandidateVisual(opts: {
+  candidate: SlideVisualCandidate;
+  slideGoal: string;
+  plannedTitle?: string;
+  stepNumber: number;
+  ratio: string;
+  brand?: BrandOverrides;
+}): Promise<{
+  candidate: SlideVisualCandidate;
+  processed: Buffer;
+  slide: SlideSpec;
+  composited: Buffer;
+  verification: VerificationResult;
+}> {
+  const { candidate, slideGoal, plannedTitle, stepNumber, ratio, brand } = opts;
+  const processed = await preprocessScreenshot(candidate.buffer, {
+    roundCorners: true,
+    cornerRadius: 12,
+  });
+
+  let slide: SlideSpec;
+  try {
+    const analysis = await analyzeScreenshot({
+      screenshot: processed,
+      description: slideGoal,
+      totalSlides: 1,
+    });
+    slide = analysis.slides[0];
+    slide.stepNumber = stepNumber;
+
+    if (plannedTitle && (slide.title || "").length < 5) {
+      slide.title = plannedTitle;
+    }
+
+    if (!slide.instructions || slide.instructions.length === 0) {
+      slide.instructions = [slideGoal];
+    }
+  } catch (err) {
+    console.error(`[pipeline] Analysis ${stepNumber} failed:`, err);
+    slide = {
+      stepNumber,
+      title: plannedTitle || `Step ${stepNumber}`,
+      instructions: [slideGoal],
+      annotations: [{ type: "badge", number: 1, x: 0.5, y: 0.5 }],
+    };
+  }
+
+  normalizeSlideAnnotations(slide);
+  ensureMinimumAnnotations(slide);
+
+  let composited = await compositeSlide({
+    screenshot: processed,
+    slide,
+    ratio,
+    brand,
+  });
+
+  const verification = await verifyAnnotations({
+    compositedImage: composited,
+    originalScreenshot: processed,
+    slide,
+    description: slideGoal,
+  });
+
+  if (
+    verification.status === "corrected" &&
+    verification.annotations &&
+    annotationsAreValid(verification.annotations)
+  ) {
+    console.log(
+      `[pipeline] Slide ${stepNumber}: re-compositing with ${verification.annotations.length} corrected annotations`
+    );
+    slide.annotations = verification.annotations;
+    ensureMinimumAnnotations(slide);
+    composited = await compositeSlide({
+      screenshot: processed,
+      slide,
+      ratio,
+      brand,
+    });
+  }
+
+  return { candidate, processed, slide, composited, verification };
+}
+
+export function inferSlideVisualIntent(text: string): SlideVisualIntent {
+  const normalized = text.toLowerCase();
+
+  if (/\b(logo|brand|favicon|wordmark|identity)\b/.test(normalized)) {
+    return "brand_asset";
+  }
+
+  if (/\b(video|youtube|thumbnail|watch|shorts?)\b/.test(normalized)) {
+    return "video_reference";
+  }
+
+  if (
+    /\b(click|tap|select|open|choose|enter|type|press|button|input|field|menu|nav|navigation|sidebar|header|toolbar|dropdown|dialog|modal|tab|link|cta|prompt|settings)\b/.test(
+      normalized
+    )
+  ) {
+    return "ui_step";
+  }
+
+  return "supporting_visual";
+}
+
+export function rankSlideVisualCandidates(
+  candidates: SlideVisualCandidateMeta[],
+  opts: {
+    sourceUrl: string;
+    title?: string;
+    description: string;
+    targetRatio: string;
+    pagePublishedAt?: string;
+    pageUpdatedAt?: string;
+  }
+): Array<
+  SlideVisualCandidateMeta & { score: number; intent: SlideVisualIntent }
+> {
+  const topic = [opts.title, opts.description].filter(Boolean).join(" ");
+  const intent = inferSlideVisualIntent(topic);
+  const scored = scoreImages(
+    candidates.map(candidate => candidate.image),
+    {
+      sourceUrl: opts.sourceUrl,
+      topic,
+      targetRatio: opts.targetRatio,
+      pagePublishedAt: opts.pagePublishedAt,
+      pageUpdatedAt: opts.pageUpdatedAt,
+    }
+  );
+  const scoreByUrl = new Map(scored.map(image => [image.url, image.score]));
+
+  return candidates
+    .map(candidate => ({
+      ...candidate,
+      intent,
+      score:
+        (scoreByUrl.get(candidate.image.url) ?? 0) +
+        getIntentAdjustment(candidate, intent),
+    }))
+    .sort((a, b) => b.score - a.score);
+}
+
+function choosePreferredSlideVisual(
+  rankedCandidates: Array<
+    SlideVisualCandidateMeta & { score: number; intent: SlideVisualIntent }
+  >
+) {
+  if (rankedCandidates.length === 0) return undefined;
+
+  const topCandidate = rankedCandidates[0];
+  if (topCandidate.intent !== "ui_step") return topCandidate;
+
+  const bestScreenshotCandidate = rankedCandidates.find(
+    candidate => candidate.source !== "page_asset"
+  );
+
+  if (
+    bestScreenshotCandidate &&
+    bestScreenshotCandidate.score >= topCandidate.score - 0.08
+  ) {
+    return bestScreenshotCandidate;
+  }
+
+  return topCandidate;
+}
+
+function getIntentAdjustment(
+  candidate: SlideVisualCandidateMeta,
+  intent: SlideVisualIntent
+): number {
+  const isScreenshot =
+    candidate.source === "crop" || candidate.source === "viewport";
+  const imageType = candidate.image.type;
+
+  if (intent === "ui_step") {
+    return (
+      (candidate.source === "crop" ? 0.18 : 0) +
+      (candidate.source === "viewport" ? 0.1 : 0) +
+      (!isScreenshot ? -0.14 : 0) +
+      (imageType === "video_thumbnail" ? -0.18 : 0)
+    );
+  }
+
+  if (intent === "supporting_visual") {
+    return (
+      (candidate.source === "page_asset" ? 0.12 : 0) +
+      (imageType === "og_image" ? 0.08 : 0) +
+      (candidate.source === "crop" ? -0.03 : 0)
+    );
+  }
+
+  if (intent === "brand_asset") {
+    return (
+      (imageType === "logo" ? 0.28 : 0) +
+      (imageType === "og_image" ? 0.08 : 0) +
+      (isScreenshot ? -0.16 : 0)
+    );
+  }
+
+  return (
+    (imageType === "video_thumbnail" ? 0.24 : 0) +
+    (candidate.source === "page_asset" ? 0.08 : -0.04)
+  );
+}
+
+function normalizeSlideAnnotations(slide: SlideSpec) {
+  if (!slide.annotations) return;
+
+  const needsNormalize = slide.annotations.some(
+    a => a.x > 1 || a.y > 1 || (a.w && a.w > 1) || (a.h && a.h > 1)
+  );
+
+  if (needsNormalize) {
+    const vw = 1440;
+    const vh = 900;
+    for (const ann of slide.annotations) {
+      if (ann.x > 1) ann.x = Math.min(ann.x / vw, 0.95);
+      if (ann.y > 1) ann.y = Math.min(ann.y / vh, 0.95);
+      if (ann.w && ann.w > 1) ann.w = Math.min(ann.w / vw, 0.9);
+      if (ann.h && ann.h > 1) ann.h = Math.min(ann.h / vh, 0.9);
+      if (ann.toX && ann.toX > 1) ann.toX = Math.min(ann.toX / vw, 0.95);
+      if (ann.toY && ann.toY > 1) ann.toY = Math.min(ann.toY / vh, 0.95);
+    }
+  }
+
+  for (const ann of slide.annotations) {
+    ann.x = Math.max(0.02, Math.min(ann.x, 0.98));
+    ann.y = Math.max(0.02, Math.min(ann.y, 0.98));
+    if (ann.w) ann.w = Math.max(0.05, Math.min(ann.w, 0.95));
+    if (ann.h) ann.h = Math.max(0.05, Math.min(ann.h, 0.95));
+  }
+}
+
+function ensureMinimumAnnotations(slide: SlideSpec) {
+  if (!slide.annotations || slide.annotations.length === 0) {
+    slide.annotations = [
+      { type: "highlight", x: 0.1, y: 0.3, w: 0.8, h: 0.4 },
+      { type: "badge", number: 1, x: 0.1, y: 0.3 },
+    ];
+    return;
+  }
+
+  if (!slide.annotations.some(a => a.type === "highlight")) {
+    slide.annotations.push({
+      type: "highlight",
+      x: 0.1,
+      y: 0.3,
+      w: 0.8,
+      h: 0.4,
+    });
+  }
+
+  if (!slide.annotations.some(a => a.type === "badge")) {
+    slide.annotations.unshift({ type: "badge", number: 1, x: 0.5, y: 0.5 });
+  }
+}
+
+function annotationsAreValid(annotations: SlideSpec["annotations"]) {
+  return annotations.every(
+    a =>
+      a.x >= 0 &&
+      a.x <= 1 &&
+      a.y >= 0 &&
+      a.y <= 1 &&
+      (!a.w || (a.w > 0 && a.w <= 1)) &&
+      (!a.h || (a.h > 0 && a.h <= 1))
+  );
 }

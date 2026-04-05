@@ -381,12 +381,17 @@ function clamp(value: number, min: number, max: number): number {
  * Verification pass — look at the composited image and check if annotations are correct.
  * Returns corrected annotations if needed, or null if they look fine.
  */
+export interface VerificationResult {
+  status: "correct" | "corrected" | "missing_target" | "failed";
+  annotations?: SlideSpec["annotations"];
+}
+
 export async function verifyAnnotations(opts: {
   compositedImage: Buffer;
   originalScreenshot: Buffer;
   slide: SlideSpec;
   description: string;
-}): Promise<SlideSpec["annotations"] | null> {
+}): Promise<VerificationResult> {
   const { compositedImage, originalScreenshot, slide, description } = opts;
   const compositeUrl = bufferToDataUrl(compositedImage);
   const originalUrl = bufferToDataUrl(originalScreenshot);
@@ -402,12 +407,15 @@ export async function verifyAnnotations(opts: {
 Check if the annotations (numbered badges, highlight boxes, labels) are correctly placed on the relevant UI elements.
 
 If annotations are WRONG (badge not on the element, highlight not covering the right area, or annotations missing), return corrected coordinates.
+If the target described in the goal is NOT VISIBLE in the original screenshot at all, respond with: {"correct": false, "missingTarget": true}
 If annotations look CORRECT, respond with just: {"correct": true}
 
 When correcting, use the ORIGINAL screenshot coordinates (relative 0.0-1.0).
 
 OUTPUT — respond with ONLY JSON, no markdown:
 {"correct": true}
+OR
+{"correct": false, "missingTarget": true}
 OR
 {"correct": false, "annotations": [
   {"type": "badge", "number": 1, "x": 0.5, "y": 0.3},
@@ -452,18 +460,22 @@ OR
     const result = JSON.parse(cleaned);
     if (result.correct) {
       console.log("[verify] Annotations look correct");
-      return null;
+      return { status: "correct" };
+    }
+    if (result.missingTarget) {
+      console.log("[verify] Target not visible in candidate screenshot");
+      return { status: "missing_target" };
     }
     if (result.annotations && result.annotations.length > 0) {
       console.log(
         "[verify] Correcting annotations:",
         result.annotations.length
       );
-      return result.annotations;
+      return { status: "corrected", annotations: result.annotations };
     }
-    return null;
+    return { status: "failed" };
   } catch {
     console.warn("[verify] Failed to parse verification response");
-    return null;
+    return { status: "failed" };
   }
 }
