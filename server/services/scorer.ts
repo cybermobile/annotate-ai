@@ -21,16 +21,24 @@ export function scoreImages(
     sourceUrl: string;
     topic?: string;
     targetRatio?: string;
+    pagePublishedAt?: string;
+    pageUpdatedAt?: string;
   }
 ): ScoredImage[] {
-  const { sourceUrl, topic = "", targetRatio = "4:5" } = opts;
+  const {
+    sourceUrl,
+    topic = "",
+    targetRatio = "4:5",
+    pagePublishedAt,
+    pageUpdatedAt,
+  } = opts;
   const sourceDomain = extractDomain(sourceUrl);
 
   return images
-    .map((img) => {
+    .map(img => {
       const relevance = computeRelevance(img, topic);
       const firstParty = computeFirstParty(img, sourceDomain);
-      const recency = computeRecency(img);
+      const recency = computeRecency(img, { pagePublishedAt, pageUpdatedAt });
       const readability = computeReadability(img);
       const layoutFit = computeLayoutFit(img, targetRatio);
 
@@ -39,7 +47,7 @@ export function scoreImages(
         0.25 * firstParty +
         0.15 * recency +
         0.15 * readability +
-        0.10 * layoutFit;
+        0.1 * layoutFit;
 
       return {
         ...img,
@@ -62,7 +70,9 @@ function computeRelevance(img: ScrapedImage, topic: string): number {
   if (topic && img.alt) {
     const topicWords = topic.toLowerCase().split(/\s+/);
     const altLower = img.alt.toLowerCase();
-    const matches = topicWords.filter((w) => w.length > 3 && altLower.includes(w));
+    const matches = topicWords.filter(
+      w => w.length > 3 && altLower.includes(w)
+    );
     score += Math.min(matches.length * 0.1, 0.3);
   }
 
@@ -77,7 +87,10 @@ function computeFirstParty(img: ScrapedImage, sourceDomain: string): number {
     const imgDomain = extractDomain(img.url);
     if (imgDomain === sourceDomain) return 1.0;
     // CDN subdomains often serve first-party content
-    if (imgDomain.endsWith(`.${sourceDomain}`) || sourceDomain.endsWith(`.${imgDomain}`))
+    if (
+      imgDomain.endsWith(`.${sourceDomain}`) ||
+      sourceDomain.endsWith(`.${imgDomain}`)
+    )
       return 0.8;
     // Common CDNs
     const cdnDomains = [
@@ -88,17 +101,35 @@ function computeFirstParty(img: ScrapedImage, sourceDomain: string): number {
       "wp.com",
       "githubusercontent.com",
     ];
-    if (cdnDomains.some((cdn) => imgDomain.endsWith(cdn))) return 0.6;
+    if (cdnDomains.some(cdn => imgDomain.endsWith(cdn))) return 0.6;
     return 0.2;
   } catch {
     return 0.3;
   }
 }
 
-function computeRecency(_img: ScrapedImage): number {
-  // Without metadata timestamps, we use heuristics
-  // Images from the page are assumed to be current
-  return 0.7;
+function computeRecency(
+  img: ScrapedImage,
+  pageDates: { pagePublishedAt?: string; pageUpdatedAt?: string }
+): number {
+  const timestamp =
+    parseTimestamp(img.updatedAt) ||
+    parseTimestamp(img.publishedAt) ||
+    parseTimestamp(pageDates.pageUpdatedAt) ||
+    parseTimestamp(pageDates.pagePublishedAt);
+
+  if (!timestamp) return 0.45;
+
+  const ageDays = Math.max(
+    0,
+    (Date.now() - timestamp.getTime()) / (1000 * 60 * 60 * 24)
+  );
+
+  if (ageDays <= 14) return 1.0;
+  if (ageDays <= 45) return 0.9;
+  if (ageDays <= 120) return 0.75;
+  if (ageDays <= 365) return 0.55;
+  return 0.35;
 }
 
 function computeReadability(img: ScrapedImage): number {
@@ -141,4 +172,10 @@ function extractDomain(url: string): string {
   } catch {
     return "";
   }
+}
+
+function parseTimestamp(value?: string): Date | null {
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }

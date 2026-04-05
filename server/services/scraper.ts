@@ -6,6 +6,10 @@ export interface ScrapedImage {
   width?: number;
   height?: number;
   type: "screenshot" | "logo" | "image" | "video_thumbnail" | "og_image";
+  sourceContext?: "og_meta" | "page_image" | "logo" | "video_thumbnail";
+  discoveredOrder?: number;
+  publishedAt?: string;
+  updatedAt?: string;
 }
 
 export interface ScrapedData {
@@ -18,8 +22,10 @@ export interface ScrapedData {
   favicon?: string;
   headings: string[];
   bodyText: string;
-  rawHtml?: string;           // raw HTML for deeper YouTube extraction
-  youtubeVideoIds: string[];  // extracted YouTube video IDs
+  pagePublishedAt?: string;
+  pageUpdatedAt?: string;
+  rawHtml?: string; // raw HTML for deeper YouTube extraction
+  youtubeVideoIds: string[]; // extracted YouTube video IDs
 }
 
 export async function scrapeUrl(url: string): Promise<ScrapedData> {
@@ -33,7 +39,9 @@ export async function scrapeUrl(url: string): Promise<ScrapedData> {
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch URL: ${response.status} ${response.statusText}`);
+    throw new Error(
+      `Failed to fetch URL: ${response.status} ${response.statusText}`
+    );
   }
 
   const html = await response.text();
@@ -53,6 +61,29 @@ export async function scrapeUrl(url: string): Promise<ScrapedData> {
   const ogImage =
     $('meta[property="og:image"]').attr("content")?.trim() ||
     $('meta[name="twitter:image"]').attr("content")?.trim();
+
+  const pagePublishedAt =
+    pickTimestamp($, [
+      'meta[property="article:published_time"]',
+      'meta[name="article:published_time"]',
+      'meta[property="og:published_time"]',
+      'meta[itemprop="datePublished"]',
+      'meta[name="publish_date"]',
+      'meta[name="parsely-pub-date"]',
+      "time[datetime]",
+    ]) || extractDateFromUrl(url);
+
+  const pageUpdatedAt =
+    pickTimestamp($, [
+      'meta[property="article:modified_time"]',
+      'meta[name="article:modified_time"]',
+      'meta[property="og:updated_time"]',
+      'meta[itemprop="dateModified"]',
+      'meta[name="last-modified"]',
+      'meta[http-equiv="last-modified"]',
+      'meta[name="parsely-modified-date"]',
+      "time[datetime]",
+    ]) || pagePublishedAt;
 
   const favicon =
     $('link[rel="icon"]').attr("href")?.trim() ||
@@ -74,12 +105,23 @@ export async function scrapeUrl(url: string): Promise<ScrapedData> {
     const resolvedOg = resolveUrl(ogImage, url);
     if (resolvedOg && !seenUrls.has(resolvedOg)) {
       seenUrls.add(resolvedOg);
-      images.push({ url: resolvedOg, alt: "Open Graph Image", type: "og_image" });
+      images.push({
+        url: resolvedOg,
+        alt: "Open Graph Image",
+        type: "og_image",
+        sourceContext: "og_meta",
+        discoveredOrder: images.length,
+        publishedAt: extractDateFromUrl(resolvedOg) || pagePublishedAt,
+        updatedAt: extractDateFromUrl(resolvedOg) || pageUpdatedAt,
+      });
     }
   }
 
   $("img").each((_, el) => {
-    const src = $(el).attr("src") || $(el).attr("data-src") || $(el).attr("data-lazy-src");
+    const src =
+      $(el).attr("src") ||
+      $(el).attr("data-src") ||
+      $(el).attr("data-lazy-src");
     if (!src) return;
     const resolvedSrc = resolveUrl(src, url);
     if (!resolvedSrc || seenUrls.has(resolvedSrc)) return;
@@ -102,6 +144,10 @@ export async function scrapeUrl(url: string): Promise<ScrapedData> {
       width: width || undefined,
       height: height || undefined,
       type: isLogo ? "logo" : "image",
+      sourceContext: isLogo ? "logo" : "page_image",
+      discoveredOrder: images.length,
+      publishedAt: extractDateFromUrl(resolvedSrc) || pagePublishedAt,
+      updatedAt: extractDateFromUrl(resolvedSrc) || pageUpdatedAt,
     });
   });
 
@@ -119,10 +165,15 @@ export async function scrapeUrl(url: string): Promise<ScrapedData> {
   // Scan iframes, links, and embeds
   $(
     'iframe[src*="youtube"], iframe[src*="youtu.be"], iframe[data-src*="youtube"], ' +
-    'a[href*="youtube.com/watch"], a[href*="youtu.be"], a[href*="youtube.com/embed"], ' +
-    'a[href*="youtube.com/shorts"], embed[src*="youtube"], object[data*="youtube"]'
+      'a[href*="youtube.com/watch"], a[href*="youtu.be"], a[href*="youtube.com/embed"], ' +
+      'a[href*="youtube.com/shorts"], embed[src*="youtube"], object[data*="youtube"]'
   ).each((_, el) => {
-    const src = $(el).attr("src") || $(el).attr("data-src") || $(el).attr("href") || $(el).attr("data") || "";
+    const src =
+      $(el).attr("src") ||
+      $(el).attr("data-src") ||
+      $(el).attr("href") ||
+      $(el).attr("data") ||
+      "";
     const videoId = extractYouTubeId(src);
     if (videoId && !seenVideoIds.has(videoId)) {
       seenVideoIds.add(videoId);
@@ -131,7 +182,10 @@ export async function scrapeUrl(url: string): Promise<ScrapedData> {
   });
 
   // Also scan bare YouTube URLs in the body text
-  const bareYtUrls = html.match(/https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)[a-zA-Z0-9_-]{11}/g) || [];
+  const bareYtUrls =
+    html.match(
+      /https?:\/\/(?:www\.)?(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/|youtube\.com\/shorts\/)[a-zA-Z0-9_-]{11}/g
+    ) || [];
   for (const ytUrl of bareYtUrls) {
     const videoId = extractYouTubeId(ytUrl);
     if (videoId && !seenVideoIds.has(videoId)) {
@@ -145,7 +199,15 @@ export async function scrapeUrl(url: string): Promise<ScrapedData> {
     const thumbUrl = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
     if (!seenUrls.has(thumbUrl)) {
       seenUrls.add(thumbUrl);
-      images.push({ url: thumbUrl, alt: "YouTube Video Thumbnail", type: "video_thumbnail" });
+      images.push({
+        url: thumbUrl,
+        alt: "YouTube Video Thumbnail",
+        type: "video_thumbnail",
+        sourceContext: "video_thumbnail",
+        discoveredOrder: images.length,
+        publishedAt: pagePublishedAt,
+        updatedAt: pageUpdatedAt,
+      });
     }
   }
 
@@ -158,9 +220,44 @@ export async function scrapeUrl(url: string): Promise<ScrapedData> {
     favicon: favicon ? (resolveUrl(favicon, url) ?? undefined) : undefined,
     headings: headings.slice(0, 15),
     bodyText,
+    pagePublishedAt,
+    pageUpdatedAt,
     rawHtml: html,
     youtubeVideoIds,
   };
+}
+
+function pickTimestamp(
+  $: cheerio.CheerioAPI,
+  selectors: string[]
+): string | undefined {
+  for (const selector of selectors) {
+    const el = $(selector).first();
+    if (!el.length) continue;
+
+    const value =
+      el.attr("content")?.trim() ||
+      el.attr("datetime")?.trim() ||
+      el.text().trim();
+
+    const normalized = normalizeTimestamp(value);
+    if (normalized) return normalized;
+  }
+  return undefined;
+}
+
+function normalizeTimestamp(value?: string): string | undefined {
+  if (!value) return undefined;
+
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+
+  const direct = new Date(trimmed);
+  if (!Number.isNaN(direct.getTime())) {
+    return direct.toISOString();
+  }
+
+  return extractDateFromUrl(trimmed);
 }
 
 function resolveUrl(src: string, baseUrl: string): string | null {
@@ -178,4 +275,20 @@ function extractYouTubeId(url: string): string | null {
     /(?:youtube\.com\/(?:embed\/|watch\?v=)|youtu\.be\/)([a-zA-Z0-9_-]{11})/
   );
   return match ? match[1] : null;
+}
+
+function extractDateFromUrl(value: string): string | undefined {
+  const pathMatch =
+    value.match(
+      /(20\d{2})[\/_-](0?[1-9]|1[0-2])[\/_-](0?[1-9]|[12]\d|3[01])/i
+    ) || value.match(/(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])/i);
+
+  if (!pathMatch) return undefined;
+
+  const [, year, month, day] = pathMatch;
+  const date = new Date(
+    `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}T12:00:00Z`
+  );
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
 }

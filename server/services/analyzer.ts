@@ -14,14 +14,13 @@ ANNOTATION TYPES:
 - "label": Short text callout near an element. { type: "label", text: "Click here", x, y }
 
 GUIDELINES:
-- Every slide MUST have ALL THREE: 1 badge, 1 highlight, and 1 label (callout text)
-- The label is a short callout (2-5 words) like "Click here", "Sign up", "Main dashboard", "Select this option"
-- Place badges directly on buttons, links, or input fields
-- Highlight boxes should cover the ENTIRE relevant section generously
-- Use arrows when showing flow between two separate elements
+- Every slide MUST include at least 1 highlight around the main target
+- Add a badge when a specific button, link, or input needs to be pinpointed
+- Add a label only when it clarifies an otherwise ambiguous target
+- The label is a short callout (1-4 words) that names the element, like "Ask AI", "Chat tutorial", "Settings"
+- Highlight boxes should cover the ENTIRE relevant section generously without swallowing the whole screen
+- Use arrows only when showing flow between two separate visible elements
 - Only annotate elements you can actually SEE in the screenshot
-
-DO NOT use screenshotCrop.
 
 OUTPUT — respond with ONLY this JSON, no markdown:
 {
@@ -37,6 +36,27 @@ OUTPUT — respond with ONLY this JSON, no markdown:
       ]
     }
   ]
+}`;
+
+const CROP_SYSTEM_PROMPT = `You are selecting the best crop region from a webpage screenshot for a vertical tutorial slide.
+
+COORDINATE SYSTEM:
+- All crop values are RELATIVE (0.0 to 1.0) within the screenshot
+- left=0 is the left edge, top=0 is the top edge
+- width and height are also relative fractions of the screenshot
+
+YOUR JOB:
+- Pick a crop that keeps the target UI described in the prompt fully visible
+- Keep some nearby context around the target so the slide still makes sense
+- Make the crop tight enough that the target will read clearly in a vertical social post
+- Only use UI that is actually visible in the screenshot
+
+OUTPUT — respond with ONLY this JSON:
+{
+  "left": 0.1,
+  "top": 0.2,
+  "width": 0.6,
+  "height": 0.35
 }`;
 
 export interface SlideSpec {
@@ -61,6 +81,13 @@ export interface SlideSpec {
     toY?: number;
     curve?: "left" | "right";
   }>;
+}
+
+export interface ScreenshotCrop {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
 export interface CarouselPlan {
@@ -101,10 +128,11 @@ export async function analyzeScreenshot(opts: {
 
 GOAL: ${description}
 
-For each slide you MUST include all three annotation types:
-1. A "badge" — numbered circle placed on the key interactive element
-2. A "highlight" — rectangle covering the relevant section generously
-3. A "label" — short callout text (2-5 words) describing what the user should do, like "Click here" or "Enter your email"
+For each slide:
+1. You MUST include a "highlight" around the main UI target
+2. Add a "badge" when a precise control needs to be pinpointed
+3. Add a "label" only when a short element name improves clarity
+4. Add an "arrow" only when it helps connect two separate visible areas
 
 Be precise with coordinates — look at where elements actually are in the image.`;
 
@@ -132,8 +160,10 @@ Be precise with coordinates — look at where elements actually are in the image
       ? response.choices[0].message.content
       : Array.isArray(response.choices[0]?.message?.content)
         ? response.choices[0].message.content
-            .filter((c): c is { type: "text"; text: string } => c.type === "text")
-            .map((c) => c.text)
+            .filter(
+              (c): c is { type: "text"; text: string } => c.type === "text"
+            )
+            .map(c => c.text)
             .join("")
         : "";
 
@@ -142,7 +172,10 @@ Be precise with coordinates — look at where elements actually are in the image
   try {
     return JSON.parse(cleaned);
   } catch (e) {
-    console.error("[analyzer] Failed to parse LLM response:", cleaned.slice(0, 500));
+    console.error(
+      "[analyzer] Failed to parse LLM response:",
+      cleaned.slice(0, 500)
+    );
     // Return a fallback single slide
     return {
       slides: [
@@ -154,6 +187,58 @@ Be precise with coordinates — look at where elements actually are in the image
         },
       ],
     };
+  }
+}
+
+export async function selectScreenshotCrop(opts: {
+  screenshot: Buffer;
+  description: string;
+  ratio?: string;
+}): Promise<ScreenshotCrop | undefined> {
+  const { screenshot, description, ratio = "4:5" } = opts;
+  const imageUrl = bufferToDataUrl(screenshot);
+
+  const response = await invokeLLM({
+    messages: [
+      { role: "system", content: CROP_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { url: imageUrl, detail: "high" },
+          },
+          {
+            type: "text",
+            text: `Target aspect ratio: ${ratio}
+Goal: ${description}
+
+Select the tightest useful crop that keeps the target area readable in a vertical tutorial slide.`,
+          },
+        ],
+      },
+    ],
+  });
+
+  const textContent =
+    typeof response.choices[0]?.message?.content === "string"
+      ? response.choices[0].message.content
+      : Array.isArray(response.choices[0]?.message?.content)
+        ? response.choices[0].message.content
+            .filter(
+              (c): c is { type: "text"; text: string } => c.type === "text"
+            )
+            .map(c => c.text)
+            .join("")
+        : "";
+
+  const cleaned = textContent.replace(/```json|```/g, "").trim();
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    return normalizeCrop(parsed, ratio);
+  } catch {
+    return undefined;
   }
 }
 
@@ -175,7 +260,9 @@ export async function planCarousel(opts: {
 
   const contextInfo = [
     pageTitle ? `Page title: ${pageTitle}` : "",
-    pageHeadings?.length ? `Main headings: ${pageHeadings.slice(0, 8).join(", ")}` : "",
+    pageHeadings?.length
+      ? `Main headings: ${pageHeadings.slice(0, 8).join(", ")}`
+      : "",
     bodyText ? `Page content excerpt: ${bodyText.slice(0, 1500)}` : "",
   ]
     .filter(Boolean)
@@ -230,7 +317,7 @@ OUTPUT FORMAT — respond with ONLY this JSON, no markdown fences:
 
     // SAFETY: Force all screenshotUrls to be the source URL
     // This prevents the LLM from hallucinating URLs that will 404
-    parsed.slides = parsed.slides.map((slide) => ({
+    parsed.slides = parsed.slides.map(slide => ({
       ...slide,
       screenshotUrl: url, // Always use the source URL
     }));
@@ -266,6 +353,28 @@ OUTPUT FORMAT — respond with ONLY this JSON, no markdown fences:
       suggestedRatio: "4:5",
     };
   }
+}
+
+function normalizeCrop(
+  crop: Partial<ScreenshotCrop>,
+  ratio: string
+): ScreenshotCrop {
+  const minWidth = ratio === "9:16" ? 0.28 : 0.32;
+  const minHeight = ratio === "9:16" ? 0.2 : 0.24;
+
+  let width = clamp(crop.width ?? 1, minWidth, 1);
+  let height = clamp(crop.height ?? 1, minHeight, 1);
+  let left = clamp(crop.left ?? 0, 0, 1 - width);
+  let top = clamp(crop.top ?? 0, 0, 1 - height);
+
+  if (left + width > 1) left = Math.max(0, 1 - width);
+  if (top + height > 1) top = Math.max(0, 1 - height);
+
+  return { left, top, width, height };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(value, max));
 }
 
 /**
@@ -304,17 +413,29 @@ OR
   {"type": "badge", "number": 1, "x": 0.5, "y": 0.3},
   {"type": "highlight", "x": 0.3, "y": 0.2, "w": 0.4, "h": 0.2},
   {"type": "label", "text": "Click here", "x": 0.7, "y": 0.3}
-]}`
+]}`,
       },
       {
         role: "user",
         content: [
-          { type: "text", text: `GOAL: ${description}\nCurrent annotations should highlight: ${slide.title}` },
+          {
+            type: "text",
+            text: `GOAL: ${description}\nCurrent annotations should highlight: ${slide.title}`,
+          },
           { type: "text", text: "ORIGINAL SCREENSHOT:" },
-          { type: "image_url", image_url: { url: originalUrl, detail: "high" } },
+          {
+            type: "image_url",
+            image_url: { url: originalUrl, detail: "high" },
+          },
           { type: "text", text: "COMPOSITED SLIDE (with annotations):" },
-          { type: "image_url", image_url: { url: compositeUrl, detail: "high" } },
-          { type: "text", text: "Are the annotations correctly placed on the right UI elements? If not, return corrected coordinates." },
+          {
+            type: "image_url",
+            image_url: { url: compositeUrl, detail: "high" },
+          },
+          {
+            type: "text",
+            text: "Are the annotations correctly placed on the right UI elements? If not, return corrected coordinates.",
+          },
         ],
       },
     ],
@@ -334,7 +455,10 @@ OR
       return null;
     }
     if (result.annotations && result.annotations.length > 0) {
-      console.log("[verify] Correcting annotations:", result.annotations.length);
+      console.log(
+        "[verify] Correcting annotations:",
+        result.annotations.length
+      );
       return result.annotations;
     }
     return null;

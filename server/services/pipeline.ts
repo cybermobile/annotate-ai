@@ -1,7 +1,26 @@
 import { scrapeUrl, type ScrapedData } from "./scraper";
-import { captureScreenshot, fetchImageBuffer, preprocessScreenshot } from "./screenshot";
-import { analyzeScreenshot, planCarousel, verifyAnnotations, type SlideSpec, type CarouselPlan } from "./analyzer";
-import { compositeSlide, compositeHookSlide, compositeCTASlide, compositeYouTubeSlide, CANVAS_PRESETS, type BrandOverrides } from "./compositor";
+import {
+  captureScreenshot,
+  fetchImageBuffer,
+  preprocessScreenshot,
+} from "./screenshot";
+import {
+  analyzeScreenshot,
+  planCarousel,
+  selectScreenshotCrop,
+  verifyAnnotations,
+  type SlideSpec,
+  type CarouselPlan,
+  type ScreenshotCrop,
+} from "./analyzer";
+import {
+  compositeSlide,
+  compositeHookSlide,
+  compositeCTASlide,
+  compositeYouTubeSlide,
+  CANVAS_PRESETS,
+  type BrandOverrides,
+} from "./compositor";
 import { scoreImages, type ScoredImage } from "./scorer";
 import { resolveYouTubeVideos, type YouTubeVideo } from "./youtube";
 import { storagePut } from "../storage";
@@ -9,7 +28,13 @@ import { nanoid } from "nanoid";
 import sharp from "sharp";
 
 export interface PipelineProgress {
-  phase: "scraping" | "scoring" | "analyzing" | "generating" | "completed" | "failed";
+  phase:
+    | "scraping"
+    | "scoring"
+    | "analyzing"
+    | "generating"
+    | "completed"
+    | "failed";
   message: string;
   currentStep: number;
   totalSteps: number;
@@ -55,7 +80,12 @@ export async function runAutoPipeline(opts: {
     });
 
   // ── Step 1: Scrape the URL ───────────────────────────────────
-  report({ phase: "scraping", message: "Scraping URL for content and images...", currentStep: 0, totalSteps: 8 });
+  report({
+    phase: "scraping",
+    message: "Scraping URL for content and images...",
+    currentStep: 0,
+    totalSteps: 8,
+  });
 
   let scrapedData: ScrapedData;
   try {
@@ -74,24 +104,44 @@ export async function runAutoPipeline(opts: {
   }
 
   // ── Step 2: Score discovered images ──────────────────────────
-  report({ phase: "scoring", message: "Scoring discovered images for relevance...", currentStep: 1, totalSteps: 8 });
+  report({
+    phase: "scoring",
+    message: "Scoring discovered images for relevance...",
+    currentStep: 1,
+    totalSteps: 8,
+  });
 
   const tutorialDescription = description || `How to use ${scrapedData.title}`;
 
-  const scoredImages: ScoredImage[] = scrapedData.images.length > 0
-    ? scoreImages(scrapedData.images, {
-        sourceUrl: url,
-        topic: tutorialDescription,
-        targetRatio: ratio,
-      })
-    : [];
+  const scoredImages: ScoredImage[] =
+    scrapedData.images.length > 0
+      ? scoreImages(scrapedData.images, {
+          sourceUrl: url,
+          topic: tutorialDescription,
+          targetRatio: ratio,
+          pagePublishedAt: scrapedData.pagePublishedAt,
+          pageUpdatedAt: scrapedData.pageUpdatedAt,
+        })
+      : [];
 
-  console.log(`[pipeline] Scored ${scoredImages.length} images. Top 3:`,
-    scoredImages.slice(0, 3).map(i => ({ url: i.url.slice(0, 60), score: i.score.toFixed(2), type: i.type }))
+  console.log(
+    `[pipeline] Scored ${scoredImages.length} images. Top 3:`,
+    scoredImages
+      .slice(0, 3)
+      .map(i => ({
+        url: i.url.slice(0, 60),
+        score: i.score.toFixed(2),
+        type: i.type,
+      }))
   );
 
   // ── Step 3: Plan the carousel ────────────────────────────────
-  report({ phase: "analyzing", message: "Planning tutorial carousel structure...", currentStep: 2, totalSteps: 8 });
+  report({
+    phase: "analyzing",
+    message: "Planning tutorial carousel structure...",
+    currentStep: 2,
+    totalSteps: 8,
+  });
 
   const plan = await planCarousel({
     url,
@@ -111,7 +161,12 @@ export async function runAutoPipeline(opts: {
   // We capture a single high-quality screenshot of the source URL
   // and reuse it across all content slides. Each slide will crop/focus
   // on different regions based on the LLM analysis.
-  report({ phase: "generating", message: `Capturing screenshot of source page...`, currentStep: 3, totalSteps: 3 + totalOutputSlides });
+  report({
+    phase: "generating",
+    message: `Capturing screenshot of source page...`,
+    currentStep: 3,
+    totalSteps: 3 + totalOutputSlides,
+  });
 
   let mainScreenshot: Buffer;
   try {
@@ -120,7 +175,9 @@ export async function runAutoPipeline(opts: {
       fullPage: true, // Capture full page to allow cropping different sections
       delay: 3000,
     });
-    console.log(`[pipeline] Main screenshot captured: ${mainScreenshot.length} bytes`);
+    console.log(
+      `[pipeline] Main screenshot captured: ${mainScreenshot.length} bytes`
+    );
   } catch (err) {
     console.error("[pipeline] Main screenshot capture failed:", err);
     // Try with non-full-page as fallback
@@ -141,7 +198,9 @@ export async function runAutoPipeline(opts: {
           channels: 4,
           background: { r: 26, g: 26, b: 26, alpha: 255 },
         },
-      }).png().toBuffer();
+      })
+        .png()
+        .toBuffer();
     }
   }
 
@@ -158,16 +217,22 @@ export async function runAutoPipeline(opts: {
   }
 
   // ── Step 5: Generate hook frame ──────────────────────────────
-  report({ phase: "generating", message: "Creating hook/title frame...", currentStep: 4, totalSteps: 3 + totalOutputSlides });
+  report({
+    phase: "generating",
+    message: "Creating hook/title frame...",
+    currentStep: 4,
+    totalSteps: 3 + totalOutputSlides,
+  });
 
   const canvasSize = CANVAS_PRESETS[ratio] || CANVAS_PRESETS["4:5"];
   const images: PipelineResult["images"] = [];
   const tutorialSteps: SlideSpec[] = [];
 
   // Hook frame (slide 0) — uses best scored image or the viewport screenshot as background
-  const hookBgImage = scoredImages.length > 0
-    ? await fetchImageBufferSafe(scoredImages[0].url)
-    : null;
+  const hookBgImage =
+    scoredImages.length > 0
+      ? await fetchImageBufferSafe(scoredImages[0].url)
+      : null;
 
   const hookBuffer = await compositeHookSlide({
     backgroundImage: hookBgImage || viewportScreenshot || mainScreenshot,
@@ -178,7 +243,11 @@ export async function runAutoPipeline(opts: {
   });
 
   const hookKey = `annotated/${nanoid()}-hook.png`;
-  const { url: hookUrl, key: hookKeyFinal } = await storagePut(hookKey, hookBuffer, "image/png");
+  const { url: hookUrl, key: hookKeyFinal } = await storagePut(
+    hookKey,
+    hookBuffer,
+    "image/png"
+  );
   images.push({
     buffer: hookBuffer,
     stepNumber: 0,
@@ -199,10 +268,19 @@ export async function runAutoPipeline(opts: {
       totalSteps: 3 + totalOutputSlides,
     });
 
-    // Use viewport screenshot — more predictable for annotation placement
-    const screenshotToUse = viewportScreenshot || mainScreenshot;
+    const slideGoal = contentSlides[i]?.description || tutorialDescription;
+    const screenshotToUse = mainScreenshot || viewportScreenshot;
+    const selectedCrop = await selectScreenshotCrop({
+      screenshot: screenshotToUse,
+      description: slideGoal,
+      ratio,
+    }).catch(() => undefined);
 
-    const processed = await preprocessScreenshot(screenshotToUse, {
+    const slideScreenshot = selectedCrop
+      ? await cropScreenshotBuffer(screenshotToUse, selectedCrop)
+      : viewportScreenshot || mainScreenshot;
+
+    const processed = await preprocessScreenshot(slideScreenshot, {
       roundCorners: true,
       cornerRadius: 12,
     });
@@ -212,7 +290,7 @@ export async function runAutoPipeline(opts: {
     try {
       const analysis = await analyzeScreenshot({
         screenshot: processed,
-        description: contentSlides[i]?.description || tutorialDescription,
+        description: slideGoal,
         totalSlides: 1,
       });
       slide = analysis.slides[0];
@@ -225,18 +303,21 @@ export async function runAutoPipeline(opts: {
 
       // Merge instructions from the plan if the analysis didn't produce good ones
       if (!slide.instructions || slide.instructions.length === 0) {
-        slide.instructions = [contentSlides[i]?.description || "Follow the instructions"];
+        slide.instructions = [slideGoal];
       }
 
       // Normalize coordinates — if LLM returned pixel values instead of 0-1 relative
       if (slide.annotations) {
-        const needsNormalize = slide.annotations.some(a =>
-          a.x > 1 || a.y > 1 || (a.w && a.w > 1) || (a.h && a.h > 1)
+        const needsNormalize = slide.annotations.some(
+          a => a.x > 1 || a.y > 1 || (a.w && a.w > 1) || (a.h && a.h > 1)
         );
         if (needsNormalize) {
-          console.log(`[pipeline] Slide ${i + 1}: normalizing pixel coordinates to relative`);
+          console.log(
+            `[pipeline] Slide ${i + 1}: normalizing pixel coordinates to relative`
+          );
           // Assume viewport is ~1440x900 based on screenshot config
-          const vw = 1440, vh = 900;
+          const vw = 1440,
+            vh = 900;
           for (const ann of slide.annotations) {
             if (ann.x > 1) ann.x = Math.min(ann.x / vw, 0.95);
             if (ann.y > 1) ann.y = Math.min(ann.y / vh, 0.95);
@@ -263,7 +344,13 @@ export async function runAutoPipeline(opts: {
           { type: "badge", number: 1, x: 0.1, y: 0.3 },
         ];
       } else if (!slide.annotations.some(a => a.type === "highlight")) {
-        slide.annotations.push({ type: "highlight", x: 0.1, y: 0.3, w: 0.8, h: 0.4 });
+        slide.annotations.push({
+          type: "highlight",
+          x: 0.1,
+          y: 0.3,
+          w: 0.8,
+          h: 0.4,
+        });
       } else if (!slide.annotations.some(a => a.type === "badge")) {
         slide.annotations.unshift({ type: "badge", number: 1, x: 0.5, y: 0.5 });
       }
@@ -272,7 +359,7 @@ export async function runAutoPipeline(opts: {
       slide = {
         stepNumber: i + 1,
         title: contentSlides[i]?.title || `Step ${i + 1}`,
-        instructions: [contentSlides[i]?.description || "Follow the instructions"],
+        instructions: [slideGoal],
         annotations: [{ type: "badge", number: 1, x: 0.5, y: 0.5 }],
       };
     }
@@ -289,7 +376,10 @@ export async function runAutoPipeline(opts: {
       }
     }
 
-    console.log(`[pipeline] Slide ${i + 1} annotations:`, JSON.stringify(slide.annotations));
+    console.log(
+      `[pipeline] Slide ${i + 1} annotations:`,
+      JSON.stringify(slide.annotations)
+    );
     tutorialSteps.push(slide);
 
     let composited = await compositeSlide({
@@ -299,31 +389,47 @@ export async function runAutoPipeline(opts: {
       brand,
     });
 
-    // Verification pass — disabled for now, first pass annotations are more reliable
-    if (false) try {
+    try {
       const corrected = await verifyAnnotations({
         compositedImage: composited,
         originalScreenshot: processed,
         slide,
-        description: contentSlides[i]?.description || tutorialDescription,
+        description: slideGoal,
       });
 
       if (corrected && corrected.length > 0) {
         // Validate corrected coordinates are within bounds (0-1)
-        const valid = corrected.every(a =>
-          a.x >= 0 && a.x <= 1 && a.y >= 0 && a.y <= 1 &&
-          (!a.w || (a.w > 0 && a.w <= 1)) &&
-          (!a.h || (a.h > 0 && a.h <= 1))
+        const valid = corrected.every(
+          a =>
+            a.x >= 0 &&
+            a.x <= 1 &&
+            a.y >= 0 &&
+            a.y <= 1 &&
+            (!a.w || (a.w > 0 && a.w <= 1)) &&
+            (!a.h || (a.h > 0 && a.h <= 1))
         );
 
         if (valid) {
-          console.log(`[pipeline] Slide ${i + 1}: re-compositing with ${corrected.length} corrected annotations`);
+          console.log(
+            `[pipeline] Slide ${i + 1}: re-compositing with ${corrected.length} corrected annotations`
+          );
           slide.annotations = corrected;
           if (!slide.annotations.some(a => a.type === "highlight")) {
-            slide.annotations.push({ type: "highlight", x: 0.1, y: 0.3, w: 0.8, h: 0.4 });
+            slide.annotations.push({
+              type: "highlight",
+              x: 0.1,
+              y: 0.3,
+              w: 0.8,
+              h: 0.4,
+            });
           }
           if (!slide.annotations.some(a => a.type === "badge")) {
-            slide.annotations.unshift({ type: "badge", number: 1, x: 0.5, y: 0.5 });
+            slide.annotations.unshift({
+              type: "badge",
+              number: 1,
+              x: 0.5,
+              y: 0.5,
+            });
           }
           composited = await compositeSlide({
             screenshot: processed,
@@ -332,15 +438,24 @@ export async function runAutoPipeline(opts: {
             brand,
           });
         } else {
-          console.warn(`[pipeline] Slide ${i + 1}: corrected annotations out of bounds, keeping original`);
+          console.warn(
+            `[pipeline] Slide ${i + 1}: corrected annotations out of bounds, keeping original`
+          );
         }
       }
     } catch (err) {
-      console.warn(`[pipeline] Verification failed for slide ${i + 1}, keeping original:`, err instanceof Error ? err.message : err);
+      console.warn(
+        `[pipeline] Verification failed for slide ${i + 1}, keeping original:`,
+        err instanceof Error ? err.message : err
+      );
     }
 
     const fileKey = `annotated/${nanoid()}-slide-${i + 1}.png`;
-    const { url: imageUrl, key } = await storagePut(fileKey, composited, "image/png");
+    const { url: imageUrl, key } = await storagePut(
+      fileKey,
+      composited,
+      "image/png"
+    );
 
     images.push({
       buffer: composited,
@@ -386,7 +501,11 @@ export async function runAutoPipeline(opts: {
         });
 
         const ytKey = `annotated/${nanoid()}-youtube-${i + 1}.png`;
-        const { url: ytUrl, key: ytKeyFinal } = await storagePut(ytKey, ytSlide, "image/png");
+        const { url: ytUrl, key: ytKeyFinal } = await storagePut(
+          ytKey,
+          ytSlide,
+          "image/png"
+        );
         images.push({
           buffer: ytSlide,
           stepNumber: totalContentSlides + i + 1,
@@ -403,18 +522,27 @@ export async function runAutoPipeline(opts: {
 
   // ── Step 8: Generate CTA frame ───────────────────────────────
   const ctaStep = 6 + totalContentSlides + youtubeVideos.length;
-  report({ phase: "generating", message: "Creating recap/CTA frame...", currentStep: ctaStep, totalSteps: ctaStep + 1 });
+  report({
+    phase: "generating",
+    message: "Creating recap/CTA frame...",
+    currentStep: ctaStep,
+    totalSteps: ctaStep + 1,
+  });
 
   const ctaBuffer = await compositeCTASlide({
     title: plan.carouselTitle || tutorialDescription,
-    steps: tutorialSteps.map((s) => s.title),
+    steps: tutorialSteps.map(s => s.title),
     sourceUrl: url,
     ratio,
     brand,
   });
 
   const ctaKey = `annotated/${nanoid()}-cta.png`;
-  const { url: ctaUrl, key: ctaKeyFinal } = await storagePut(ctaKey, ctaBuffer, "image/png");
+  const { url: ctaUrl, key: ctaKeyFinal } = await storagePut(
+    ctaKey,
+    ctaBuffer,
+    "image/png"
+  );
   images.push({
     buffer: ctaBuffer,
     stepNumber: totalContentSlides + 1,
@@ -440,4 +568,34 @@ async function fetchImageBufferSafe(url: string): Promise<Buffer | null> {
   } catch {
     return null;
   }
+}
+
+async function cropScreenshotBuffer(
+  buffer: Buffer,
+  crop: ScreenshotCrop
+): Promise<Buffer> {
+  const meta = await sharp(buffer).metadata();
+  const width = meta.width || 1;
+  const height = meta.height || 1;
+
+  const left = Math.max(0, Math.min(width - 1, Math.round(crop.left * width)));
+  const top = Math.max(0, Math.min(height - 1, Math.round(crop.top * height)));
+  const cropWidth = Math.max(
+    1,
+    Math.min(width - left, Math.round(crop.width * width))
+  );
+  const cropHeight = Math.max(
+    1,
+    Math.min(height - top, Math.round(crop.height * height))
+  );
+
+  return sharp(buffer)
+    .extract({
+      left,
+      top,
+      width: cropWidth,
+      height: cropHeight,
+    })
+    .png()
+    .toBuffer();
 }

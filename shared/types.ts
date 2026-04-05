@@ -28,6 +28,10 @@ export interface ScrapedImage {
   width?: number;
   height?: number;
   type: "screenshot" | "logo" | "image" | "video_thumbnail" | "og_image";
+  sourceContext?: "og_meta" | "page_image" | "logo" | "video_thumbnail";
+  discoveredOrder?: number;
+  publishedAt?: string;
+  updatedAt?: string;
 }
 
 export interface ScrapedData {
@@ -40,6 +44,8 @@ export interface ScrapedData {
   favicon?: string;
   headings: string[];
   bodyText: string;
+  pagePublishedAt?: string;
+  pageUpdatedAt?: string;
 }
 
 export interface TutorialStep {

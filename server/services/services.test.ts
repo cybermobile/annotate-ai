@@ -17,7 +17,13 @@ describe("scoreImages", () => {
 
   it("returns scored images sorted by score descending", () => {
     const images: ScrapedImage[] = [
-      { ...baseImage, url: "https://example.com/small.png", width: 30, height: 30, type: "logo" },
+      {
+        ...baseImage,
+        url: "https://example.com/small.png",
+        width: 30,
+        height: 30,
+        type: "logo",
+      },
       { ...baseImage, url: "https://example.com/og.png", type: "og_image" },
       { ...baseImage, url: "https://other.com/img.png", type: "image" },
     ];
@@ -32,7 +38,7 @@ describe("scoreImages", () => {
     // OG image should score highest (high relevance + first party)
     expect(scored[0].url).toBe("https://example.com/og.png");
     // Each item should have a score between 0 and 1
-    scored.forEach((img) => {
+    scored.forEach(img => {
       expect(img.score).toBeGreaterThanOrEqual(0);
       expect(img.score).toBeLessThanOrEqual(1);
     });
@@ -50,9 +56,11 @@ describe("scoreImages", () => {
     });
 
     // First-party should score higher
-    const firstParty = scored.find((i) => i.url.includes("example.com"))!;
-    const thirdParty = scored.find((i) => i.url.includes("other-domain"))!;
-    expect(firstParty.scores.firstParty).toBeGreaterThan(thirdParty.scores.firstParty);
+    const firstParty = scored.find(i => i.url.includes("example.com"))!;
+    const thirdParty = scored.find(i => i.url.includes("other-domain"))!;
+    expect(firstParty.scores.firstParty).toBeGreaterThan(
+      thirdParty.scores.firstParty
+    );
   });
 
   it("scores OG images with high relevance", () => {
@@ -66,15 +74,20 @@ describe("scoreImages", () => {
       topic: "test",
     });
 
-    const ogImg = scored.find((i) => i.url === baseImage.url)!;
-    const regular = scored.find((i) => i.url.includes("regular"))!;
+    const ogImg = scored.find(i => i.url === baseImage.url)!;
+    const regular = scored.find(i => i.url.includes("regular"))!;
     expect(ogImg.scores.relevance).toBeGreaterThan(regular.scores.relevance);
   });
 
   it("scores large images as more readable", () => {
     const images: ScrapedImage[] = [
       { ...baseImage, width: 1920, height: 1080 },
-      { ...baseImage, url: "https://example.com/tiny.png", width: 100, height: 100 },
+      {
+        ...baseImage,
+        url: "https://example.com/tiny.png",
+        width: 100,
+        height: 100,
+      },
     ];
 
     const scored = scoreImages(images, {
@@ -82,8 +95,8 @@ describe("scoreImages", () => {
       topic: "test",
     });
 
-    const large = scored.find((i) => i.width === 1920)!;
-    const small = scored.find((i) => i.width === 100)!;
+    const large = scored.find(i => i.width === 1920)!;
+    const small = scored.find(i => i.width === 100)!;
     expect(large.scores.readability).toBeGreaterThan(small.scores.readability);
   });
 
@@ -121,9 +134,41 @@ describe("scoreImages", () => {
       topic: "Claude AI dashboard tutorial",
     });
 
-    const withAlt = scored.find((i) => i.alt?.includes("Claude"))!;
-    const noAlt = scored.find((i) => i.alt === "")!;
+    const withAlt = scored.find(i => i.alt?.includes("Claude"))!;
+    const noAlt = scored.find(i => i.alt === "")!;
     expect(withAlt.scores.relevance).toBeGreaterThan(noAlt.scores.relevance);
+  });
+
+  it("boosts recent assets when timestamps are available", () => {
+    const recentDate = new Date(
+      Date.now() - 3 * 24 * 60 * 60 * 1000
+    ).toISOString();
+    const oldDate = new Date(
+      Date.now() - 500 * 24 * 60 * 60 * 1000
+    ).toISOString();
+
+    const images: ScrapedImage[] = [
+      {
+        ...baseImage,
+        url: "https://example.com/recent.png",
+        publishedAt: recentDate,
+      },
+      {
+        ...baseImage,
+        url: "https://example.com/archive.png",
+        publishedAt: oldDate,
+      },
+    ];
+
+    const scored = scoreImages(images, {
+      sourceUrl: "https://example.com",
+      topic: "test",
+    });
+
+    const recent = scored.find(i => i.url.includes("recent"))!;
+    const archive = scored.find(i => i.url.includes("archive"))!;
+    expect(recent.scores.recency).toBeGreaterThan(archive.scores.recency);
+    expect(recent.score).toBeGreaterThan(archive.score);
   });
 });
 
@@ -159,8 +204,15 @@ describe("compositeSlide", () => {
 
     // Create a simple test screenshot
     const testScreenshot = await sharp({
-      create: { width: 800, height: 600, channels: 4, background: { r: 50, g: 50, b: 50, alpha: 255 } },
-    }).png().toBuffer();
+      create: {
+        width: 800,
+        height: 600,
+        channels: 4,
+        background: { r: 50, g: 50, b: 50, alpha: 255 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await compositeSlide({
       screenshot: testScreenshot,
@@ -190,8 +242,15 @@ describe("compositeSlide", () => {
     const { compositeSlide, CANVAS_PRESETS } = await import("./compositor");
 
     const testScreenshot = await sharp({
-      create: { width: 800, height: 600, channels: 4, background: { r: 50, g: 50, b: 50, alpha: 255 } },
-    }).png().toBuffer();
+      create: {
+        width: 800,
+        height: 600,
+        channels: 4,
+        background: { r: 50, g: 50, b: 50, alpha: 255 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await compositeSlide({
       screenshot: testScreenshot,
@@ -216,8 +275,15 @@ describe("compositeHookSlide", () => {
     const { compositeHookSlide, CANVAS_PRESETS } = await import("./compositor");
 
     const bgImage = await sharp({
-      create: { width: 800, height: 600, channels: 4, background: { r: 100, g: 50, b: 50, alpha: 255 } },
-    }).png().toBuffer();
+      create: {
+        width: 800,
+        height: 600,
+        channels: 4,
+        background: { r: 100, g: 50, b: 50, alpha: 255 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await compositeHookSlide({
       backgroundImage: bgImage,
@@ -259,7 +325,10 @@ describe("compositeCTASlide", () => {
 
     const result = await compositeCTASlide({
       title: "Long Tutorial",
-      steps: Array.from({ length: 20 }, (_, i) => `Step ${i + 1}: Do something important`),
+      steps: Array.from(
+        { length: 20 },
+        (_, i) => `Step ${i + 1}: Do something important`
+      ),
       sourceUrl: "https://example.com",
       ratio: "4:5",
     });
@@ -282,8 +351,10 @@ describe("scraper URL resolution", () => {
   it("handles YouTube video ID extraction from scraped data", async () => {
     // The scraper extracts YouTube thumbnails from iframes and links
     // We test the expected output format
-    const expectedThumbPattern = /^https:\/\/img\.youtube\.com\/vi\/[a-zA-Z0-9_-]{11}\/maxresdefault\.jpg$/;
-    const sampleThumb = "https://img.youtube.com/vi/dQw4w9WgXcQ/maxresdefault.jpg";
+    const expectedThumbPattern =
+      /^https:\/\/img\.youtube\.com\/vi\/[a-zA-Z0-9_-]{11}\/maxresdefault\.jpg$/;
+    const sampleThumb =
+      "https://img.youtube.com/vi/dQw4w9WgXcQ/maxresdefault.jpg";
     expect(sampleThumb).toMatch(expectedThumbPattern);
   });
 
@@ -310,8 +381,17 @@ describe("scraper URL resolution", () => {
   });
 
   it("validates ScrapedImage type enum", () => {
-    const validTypes = ["screenshot", "logo", "image", "video_thumbnail", "og_image"];
-    const img: ScrapedImage = { url: "https://example.com/img.png", type: "image" };
+    const validTypes = [
+      "screenshot",
+      "logo",
+      "image",
+      "video_thumbnail",
+      "og_image",
+    ];
+    const img: ScrapedImage = {
+      url: "https://example.com/img.png",
+      type: "image",
+    };
     expect(validTypes).toContain(img.type);
   });
 });
@@ -385,7 +465,7 @@ describe("pipeline types", () => {
     expect(slide.annotations[2].type).toBe("arrow");
     expect(slide.annotations[3].type).toBe("label");
     // All coordinates should be relative (0-1)
-    slide.annotations.forEach((ann) => {
+    slide.annotations.forEach(ann => {
       expect(ann.x).toBeGreaterThanOrEqual(0);
       expect(ann.x).toBeLessThanOrEqual(1);
       expect(ann.y).toBeGreaterThanOrEqual(0);
@@ -402,8 +482,15 @@ describe("compositor with brand overrides", () => {
     const { compositeHookSlide, CANVAS_PRESETS } = await import("./compositor");
 
     const bgImage = await sharp({
-      create: { width: 800, height: 600, channels: 4, background: { r: 100, g: 50, b: 50, alpha: 255 } },
-    }).png().toBuffer();
+      create: {
+        width: 800,
+        height: 600,
+        channels: 4,
+        background: { r: 100, g: 50, b: 50, alpha: 255 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await compositeHookSlide({
       backgroundImage: bgImage,
@@ -453,8 +540,15 @@ describe("compositor with brand overrides", () => {
     const { compositeSlide, CANVAS_PRESETS } = await import("./compositor");
 
     const testScreenshot = await sharp({
-      create: { width: 800, height: 600, channels: 4, background: { r: 50, g: 50, b: 50, alpha: 255 } },
-    }).png().toBuffer();
+      create: {
+        width: 800,
+        height: 600,
+        channels: 4,
+        background: { r: 50, g: 50, b: 50, alpha: 255 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await compositeSlide({
       screenshot: testScreenshot,
@@ -483,11 +577,20 @@ describe("compositor with brand overrides", () => {
 
   it("falls back to default theme when no brand provided", async () => {
     const sharp = (await import("sharp")).default;
-    const { compositeSlide, CANVAS_PRESETS, DEFAULT_THEME } = await import("./compositor");
+    const { compositeSlide, CANVAS_PRESETS, DEFAULT_THEME } = await import(
+      "./compositor"
+    );
 
     const testScreenshot = await sharp({
-      create: { width: 800, height: 600, channels: 4, background: { r: 50, g: 50, b: 50, alpha: 255 } },
-    }).png().toBuffer();
+      create: {
+        width: 800,
+        height: 600,
+        channels: 4,
+        background: { r: 50, g: 50, b: 50, alpha: 255 },
+      },
+    })
+      .png()
+      .toBuffer();
 
     const result = await compositeSlide({
       screenshot: testScreenshot,
