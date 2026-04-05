@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1775345054975,
+      "tag": "0000_sloppy_roulette",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1775345294616,
+      "tag": "0001_little_the_enforcers",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1775384421356,
+      "tag": "0002_bright_king_bedlam",
+      "breakpoints": true
+    }
+  ]
+}
